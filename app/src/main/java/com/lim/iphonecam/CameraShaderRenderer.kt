@@ -7,9 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
-import android.media.MediaRecorder
 import android.opengl.*
-import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
@@ -17,11 +15,9 @@ import android.provider.MediaStore
 import android.util.Range
 import android.view.Surface
 import android.widget.Toast
-import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.util.concurrent.ConcurrentLinkedDeque
 import javax.microedition.khronos.egl.EGL10
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.egl.EGLDisplay
@@ -32,21 +28,13 @@ class CameraShaderRenderer(
     private val glSurfaceView: GLSurfaceView
 ) : GLSurfaceView.Renderer, SurfaceTexture.OnFrameAvailableListener {
 
-    // Style Uniforms
     @Volatile var styleTone: Float = 0.0f
     @Volatile var styleColor: Float = 0.0f
     @Volatile var styleUndertone: Float = 0.1f
 
-    // Pro Controls State
     @Volatile var isProMode: Boolean = false
     @Volatile var manualIso: Int = 400
-    @Volatile var manualShutterNs: Long = 10_000_000L // 1/100s
-    @Volatile var manualFocusLensPos: Float = 0.0f  // 0.0 (Infinity) to 1.0 (Macro)
-
-    // Portrait & Live Photo Modes
-    @Volatile var isPortraitActive: Boolean = false
-    @Volatile var bokehBlurRadius: Float = 2.0f
-    @Volatile var isLivePhotoActive: Boolean = false
+    @Volatile var manualShutterNs: Long = 10_000_000L
 
     @Volatile var exposureCompSteps: Int = -2
     @Volatile var use60Fps: Boolean = true
@@ -60,18 +48,6 @@ class CameraShaderRenderer(
     private var surfaceHeight = 1920
 
     @Volatile private var capturePhotoRequested = false
-    @Volatile var isRecordingVideo = false
-        private set
-
-    private var mediaRecorder: MediaRecorder? = null
-    private var currentVideoFile: File? = null
-    private var encoderEglSurface: android.opengl.EGLSurface = EGL14.EGL_NO_SURFACE
-    private val videoWidth = 1080
-    private val videoHeight = 1920
-
-    // Live Photo Rolling Frame Buffer (Stores last 3 seconds of raw buffers for motion export)
-    private data class FramePacket(val timestamp: Long, val data: ByteArray)
-    private val livePhotoRingBuffer = ConcurrentLinkedDeque<FramePacket>()
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -103,7 +79,6 @@ class CameraShaderRenderer(
         }
     """.trimIndent()
 
-    // Expanded Fragment Shader: Photographic Styles + Portrait Bokeh Isolation
     private val fragmentShaderCode = """
         #version 300 es
         #extension GL_OES_EGL_image_external_essl3 : require
@@ -116,8 +91,6 @@ class CameraShaderRenderer(
         uniform float uTone;
         uniform float uColor;
         uniform float uUndertone;
-        uniform int uIsPortrait;
-        uniform float uBokehRadius;
 
         vec3 rgb2hsv(vec3 c) {
             vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
@@ -141,32 +114,13 @@ class CameraShaderRenderer(
         void main() {
             vec3 col = texture(uCameraTexture, vTexCoord).rgb;
 
-            // Base Apple P3 color matrix mapping
             col.r *= 1.02;
             col.g *= 0.985;
             col.b *= 0.99;
 
             float skinMask = getSkinMask(col);
-
-            // Portrait Bokeh Blur Simulation on background
-            if (uIsPortrait == 1) {
-                float centerDist = distance(vTexCoord, vec2(0.5, 0.5));
-                if (centerDist > 0.32 && skinMask < 0.2) {
-                    // Accumulate neighboring pixels for simulated depth-of-field blur
-                    vec3 blurCol = vec3(0.0);
-                    float total = 0.0;
-                    for (float x = -2.0; x <= 2.0; x += 1.0) {
-                        for (float y = -2.0; y <= 2.0; y += 1.0) {
-                            vec2 offset = vec2(x, y) * (uBokehRadius * 0.003);
-                            blurCol += texture(uCameraTexture, vTexCoord + offset).rgb;
-                            total += 1.0;
-                        }
-                    }
-                    col = mix(col, blurCol / total, smoothstep(0.25, 0.5, centerDist));
-                }
-            }
-
             float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+
             float shadowWeight = (1.0 - luma) * (1.0 - luma);
             float toneGamma = pow(2.0, -uTone * 0.48 * shadowWeight);
             vec3 tonedCol = pow(clamp(col, 0.0001, 1.0), vec3(toneGamma));
@@ -223,20 +177,6 @@ class CameraShaderRenderer(
             capturePhotoRequested = false
             saveCurrentFramebufferAsJpeg(surfaceWidth, surfaceHeight)
         }
-
-        if (isRecordingVideo && encoderEglSurface != EGL14.EGL_NO_SURFACE) {
-            val eglDisplay = EGL14.eglGetCurrentDisplay()
-            val eglContext = EGL14.eglGetCurrentContext()
-            val screenSurface = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
-
-            if (EGL14.eglMakeCurrent(eglDisplay, encoderEglSurface, encoderEglSurface, eglContext)) {
-                GLES30.glViewport(0, 0, videoWidth, videoHeight)
-                drawStylizedQuad()
-                EGLExt.eglPresentationTimeANDROID(eglDisplay, encoderEglSurface, st.timestamp)
-                EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface)
-                EGL14.eglMakeCurrent(eglDisplay, screenSurface, screenSurface, eglContext)
-            }
-        }
     }
 
     private fun drawStylizedQuad() {
@@ -259,8 +199,6 @@ class CameraShaderRenderer(
         GLES30.glUniform1f(GLES30.glGetUniformLocation(programId, "uTone"), styleTone)
         GLES30.glUniform1f(GLES30.glGetUniformLocation(programId, "uColor"), styleColor)
         GLES30.glUniform1f(GLES30.glGetUniformLocation(programId, "uUndertone"), styleUndertone)
-        GLES30.glUniform1i(GLES30.glGetUniformLocation(programId, "uIsPortrait"), if (isPortraitActive) 1 else 0)
-        GLES30.glUniform1f(GLES30.glGetUniformLocation(programId, "uBokehRadius"), bokehBlurRadius)
 
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
     }
@@ -288,98 +226,15 @@ class CameraShaderRenderer(
                 builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_OFF)
                 builder.set(CaptureRequest.SENSOR_ISO, manualIso)
                 builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualShutterNs)
-                builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
-                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocusLensPos * 5.0f)
             } else {
                 builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposureCompSteps)
-                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             }
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
             val fps = if (use60Fps) Range(60, 60) else Range(30, 30)
             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fps)
             session.setRepeatingRequest(builder.build(), null, cameraHandler)
         } catch (_: Exception) {}
-    }
-
-    fun toggleVideoRecording(onStateChanged: (Boolean) -> Unit) {
-        glSurfaceView.queueEvent {
-            if (!isRecordingVideo) {
-                startVideoRecordingInternal()
-                isRecordingVideo = true
-            } else {
-                stopVideoRecordingInternal()
-                isRecordingVideo = false
-            }
-            glSurfaceView.post { onStateChanged(isRecordingVideo) }
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun startVideoRecordingInternal() {
-        try {
-            val outFile = File(context.externalCacheDir, "temp_iphone16_${System.currentTimeMillis()}.mp4")
-            currentVideoFile = outFile
-
-            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                MediaRecorder()
-            }
-
-            recorder.apply {
-                setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
-                setVideoSource(MediaRecorder.VideoSource.SURFACE)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setOutputFile(outFile.absolutePath)
-                setVideoEncodingBitRate(50_000_000)
-                setVideoFrameRate(if (use60Fps) 60 else 30)
-                setVideoSize(videoWidth, videoHeight)
-                setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                prepare()
-            }
-
-            val eglDisplay = EGL14.eglGetCurrentDisplay()
-            val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
-            val numConfigs = IntArray(1)
-            val attrList = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGLExt.EGL_RECORDABLE_ANDROID, 1, EGL14.EGL_NONE
-            )
-            EGL14.eglChooseConfig(eglDisplay, attrList, 0, configs, 0, 1, numConfigs, 0)
-
-            encoderEglSurface = EGL14.eglCreateWindowSurface(
-                eglDisplay, configs[0], recorder.surface, intArrayOf(EGL14.EGL_NONE), 0
-            )
-
-            recorder.start()
-            mediaRecorder = recorder
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun stopVideoRecordingInternal() {
-        try {
-            val eglDisplay = EGL14.eglGetCurrentDisplay()
-            if (encoderEglSurface != EGL14.EGL_NO_SURFACE) {
-                EGL14.eglDestroySurface(eglDisplay, encoderEglSurface)
-                encoderEglSurface = EGL14.EGL_NO_SURFACE
-            }
-            mediaRecorder?.stop()
-            mediaRecorder?.release()
-            mediaRecorder = null
-
-            currentVideoFile?.let { file ->
-                saveVideoToGallery(file)
-                file.delete()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
     }
 
     private fun saveCurrentFramebufferAsJpeg(width: Int, height: Int) {
@@ -396,7 +251,7 @@ class CameraShaderRenderer(
                 rawBitmap.recycle()
 
                 val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, if (isLivePhotoActive) "LIVE_${System.currentTimeMillis()}.jpg" else "IMG_${System.currentTimeMillis()}.jpg")
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "IMG_iPhoneStyle_${System.currentTimeMillis()}.jpg")
                     put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                     put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/iPhone16StyleCam")
                 }
@@ -408,25 +263,11 @@ class CameraShaderRenderer(
                     }
                 }
                 uprightBitmap.recycle()
-                showToast(if (isLivePhotoActive) "Saved Live Photo!" else "Saved Photo!")
+                showToast("Saved Photo to Pictures/iPhone16StyleCam")
             } catch (e: Exception) {
                 showToast("Error saving image")
             }
         }.start()
-    }
-
-    private fun saveVideoToGallery(tempFile: File) {
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, "VID_${System.currentTimeMillis()}.mp4")
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/iPhone16StyleCam")
-        }
-        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-        uri?.let {
-            context.contentResolver.openOutputStream(it)?.use { out ->
-                tempFile.inputStream().use { input -> input.copyTo(out) }
-            }
-        }
     }
 
     @SuppressLint("MissingPermission")
@@ -445,14 +286,14 @@ class CameraShaderRenderer(
         } catch (_: Exception) {}
     }
 
-    @Suppress("DEPRECATION")
     private fun startPreviewSession(camera: CameraDevice) {
         val st = surfaceTexture ?: return
         st.setDefaultBufferSize(1920, 1080)
         val previewSurface = Surface(st)
 
-        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewSurface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
         }
         previewRequestBuilder = builder
 
@@ -490,4 +331,23 @@ class CameraShaderRenderer(
         GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, tex[0])
         GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
-        r
+        return tex[0]
+    }
+
+    private fun createProgram(vsCode: String, fsCode: String): Int {
+        val vs = loadShader(GLES30.GL_VERTEX_SHADER, vsCode)
+        val fs = loadShader(GLES30.GL_FRAGMENT_SHADER, fsCode)
+        return GLES30.glCreateProgram().also {
+            GLES30.glAttachShader(it, vs)
+            GLES30.glAttachShader(it, fs)
+            GLES30.glLinkProgram(it)
+        }
+    }
+
+    private fun loadShader(type: Int, code: String): Int {
+        return GLES30.glCreateShader(type).also {
+            GLES30.glShaderSource(it, code)
+            GLES30.glCompileShader(it)
+        }
+    }
+}
