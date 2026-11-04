@@ -26,9 +26,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO), 101)
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
         } else {
             setupCameraUi()
         }
@@ -44,7 +43,6 @@ class MainActivity : Activity() {
 
         val glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(3)
-            setEGLConfigChooser(CameraShaderRenderer.RecordableConfigChooser())
         }
         val camRenderer = CameraShaderRenderer(this, glView)
         glView.setRenderer(camRenderer)
@@ -54,7 +52,6 @@ class MainActivity : Activity() {
         renderer = camRenderer
         root.addView(glView, FrameLayout.LayoutParams(-1, -1))
 
-        // Top Readout Bar
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -70,7 +67,6 @@ class MainActivity : Activity() {
         topBar.addView(readoutLabel)
         root.addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
-        // Bottom Deck
         val bottomDeck = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -78,41 +74,36 @@ class MainActivity : Activity() {
             setPadding(32, 20, 32, 48)
         }
 
-        // Mode Selector Bar (PHOTO | LIVE | PORTRAIT | PRO)
         val modeBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, 16)
         }
-        val modes = arrayOf("PHOTO", "LIVE", "PORTRAIT", "PRO")
+        val modes = arrayOf("PHOTO", "PRO")
         modes.forEach { mode ->
             val btn = Button(this).apply {
                 text = mode
-                textSize = 11f
+                textSize = 12f
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#44FFFFFF"))
                 setOnClickListener {
-                    renderer?.isLivePhotoActive = (mode == "LIVE")
-                    renderer?.isPortraitActive = (mode == "PORTRAIT")
                     renderer?.isProMode = (mode == "PRO")
                     proControlsLayout.visibility = if (mode == "PRO") View.VISIBLE else View.GONE
                     renderer?.updateCameraParameters(renderer?.exposureCompSteps ?: -2, renderer?.use60Fps ?: true)
                     readoutLabel.text = "MODE: $mode"
                 }
             }
-            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(4, 0, 4, 0) }
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(8, 0, 8, 0) }
             modeBar.addView(btn, lp)
         }
         bottomDeck.addView(modeBar)
 
-        // 2D Photographic Style Pad
         stylePad = StylePad2DView(this) { normColor, normTone ->
             renderer?.styleColor = normColor
             renderer?.styleTone = normTone
         }
         bottomDeck.addView(stylePad, LinearLayout.LayoutParams(340, 340).apply { bottomMargin = 16 })
 
-        // Pro Controls Sliders (Hidden by default until PRO mode is selected)
         proControlsLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -121,17 +112,12 @@ class MainActivity : Activity() {
             renderer?.manualIso = 100 + (p * 31)
             renderer?.updateCameraParameters(renderer?.exposureCompSteps ?: -2, renderer?.use60Fps ?: true)
         })
-        proControlsLayout.addView(createSliderRow("SHUTTER SPEED (1/4000s - 1/2s)", 50) { p ->
+        proControlsLayout.addView(createSliderRow("SHUTTER SPEED", 50) { p ->
             renderer?.manualShutterNs = (1_000_000L + (p * 200_000L))
-            renderer?.updateCameraParameters(renderer?.exposureCompSteps ?: -2, renderer?.use60Fps ?: true)
-        })
-        proControlsLayout.addView(createSliderRow("MANUAL FOCUS (Macro ↔ Infinity)", 0) { p ->
-            renderer?.manualFocusLensPos = p / 100f
             renderer?.updateCameraParameters(renderer?.exposureCompSteps ?: -2, renderer?.use60Fps ?: true)
         })
         bottomDeck.addView(proControlsLayout)
 
-        // Shutter Button Row
         val shutterRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -141,7 +127,7 @@ class MainActivity : Activity() {
             text = "SNAP SHUTTER"
             setTextColor(Color.BLACK)
             setBackgroundColor(Color.WHITE)
-            setPadding(40, 24, 40, 24)
+            setPadding(50, 28, 50, 28)
             setOnClickListener { renderer?.triggerPhotoCapture() }
         }
         shutterRow.addView(snapBtn)
@@ -182,7 +168,7 @@ class MainActivity : Activity() {
             super.onDraw(canvas)
             val w = width.toFloat(); val h = height.toFloat()
             canvas.drawRect(2f, 2f, w - 2f, h - 2f, border)
-            canvas.drawCircle(((normX + 1f) / 2f) * w, ((1f - normY) / 2f) * h, 14f, paint)
+            canvas.drawCircle(((normX + 1f) / 2f) * w, ((1f - normY) / 2f) * h, 16f, paint)
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
