@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "com.lim.iphonecam"
-    compileSdk = 35
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.lim.iphonecam"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
     }
@@ -32,5 +32,5 @@ android {
 }
 
 dependencies {
-    // Pure Android SDK implementation for minimal APK size and zero dependency conflicts
+    // Pure Android SDK implementation - zero external dependencies required
 }
